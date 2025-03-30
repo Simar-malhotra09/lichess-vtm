@@ -3,102 +3,105 @@ import berserk
 from dotenv import load_dotenv
 import os
 import threading
+import speech_recognition as sr
 
+class LichessClient:
+    def __init__(self):
+        load_dotenv()
+        API_KEY = os.environ['lichess']
+        self.session = berserk.TokenSession(API_KEY)
+        self.client = berserk.Client(self.session)
+        self.game_id = None
+        self.moves = []
 
-
-def delete_stale_games(client, game_id=None) -> list:
-
-    if not game_id:
-        return []
-    my_games = client.games.get_ongoing()
-    print(my_games) 
-    stale_games = [c['gameId'] for c in my_games if c['gameId'] != game_id]
-
-    for s_c in stale_games:
-        client.board.abort_game(s_c)
-
-    return stale_games
-
-def start_game(client) -> str:
-    challenge = client.challenges.create_ai(color='white')
-    game_id = challenge['id']
-    return game_id
-
-def check_if_challenge_exists(client, game_id=None) -> bool:
-    if not game_id:
-        return False
-    mine_challenges = client.challenges.get_mine()
-    return any(c['id'] == game_id for c in mine_challenges)
-
-# Function to handle streaming the board state in a separate thread
-def stream_game_state(client, game_id: str, moves: list[str]):
-    for move in client.games.stream_game_moves(game_id):
-        print(move)
-    print("Starting board stream...")
-    for board_state in client.board.stream_game_state(game_id):
-        if board_state.get('moves'):
-            move = board_state.get('moves').lower().split()[-1]  # Get the latest move
-            moves.append(move)  # Add only the latest move to the moves list
-        else:
-            moves.append(-1)  # Add -1 if there are no moves yet
-
-        annotated_moves = annotate_moves_wrt_pieces(client, moves)
-        print(annotated_moves)  # Print the annotated moves
-        time.sleep(3)  # Sleep to simulate real-time updates
-
-# Annotate the moves with respect to the pieces
-def annotate_moves_wrt_pieces(client, moves: list[str]):
-    annotated_moves = []
-    for move in moves:
-        ''' each move can have '''
-        #check for pawn move
-        annotated_moves.append(move)  # You can modify this to add actual piece annotations
-    return annotated_moves
-
-
-# Function to handle user input
-def handle_user_input(client, game_id):
-    while True:
-        move = input("Enter your move (or type 'end' to quit): ----------------------").strip().lower()
+    def delete_stale_games(self):
+        if not self.game_id:
+            return []
         
-        print("\n")
-        if move == 'end':
-            print("Exiting game.")
-            client.board.resign_game(game_id)
-            break
+        my_games = self.client.games.get_ongoing()
+        stale_games = [c['gameId'] for c in my_games if c['gameId'] != self.game_id]
+        
+        for game in stale_games:
+            self.client.board.abort_game(game)
+        
+        return stale_games
 
-        # Make player move
-        try:
-            client.board.make_move(game_id=game_id, move=str(move))
-        except berserk.exceptions.ResponseError as e:
-            print("Invalid move, try again.")
-            continue
+    def start_game(self):
+        challenge = self.client.challenges.create_ai(color='white')
+        self.game_id = challenge['id']
+        print("Game ID:", self.game_id)
+        return self.game_id
 
-        # Wait for AI move
-        print("Waiting for AI...")
+    def check_if_challenge_exists(self):
+        if not self.game_id:
+            return False
+        
+        mine_challenges = self.client.challenges.get_mine()
+        return any(c['id'] == self.game_id for c in mine_challenges)
 
-def main():
-    load_dotenv()
-    API_KEY = os.environ['lichess']
+    def stream_game_state(self):
+        print("Starting board stream...")
+        for board_state in self.client.board.stream_game_state(self.game_id):
+            if board_state.get('moves'):
+                move = board_state.get('moves').lower().split()[-1]
+                self.moves.append(move)
+            else:
+                self.moves.append(-1)
 
-    session = berserk.TokenSession(API_KEY)
-    client = berserk.Client(session)
+            annotated_moves = self.annotate_moves_wrt_pieces()
+            print(annotated_moves)
+            time.sleep(3)
 
-    game_id = start_game(client)
-    print("Game ID:", game_id)
+    def annotate_moves_wrt_pieces(self):
+        return [move for move in self.moves]  
 
-    moves=[]
-    # # Delete stale games
-    # stale_games = delete_stale_games(client, game_id)
-    # print(f'Deleted {len(stale_games)} stale games')
+    def recognize_speech(self):
+        recognizer = sr.Recognizer()
+        with sr.Microphone() as source:
+            print("Say your move or 'end' to quit:")
+            try:
+                recognizer.adjust_for_ambient_noise(source, duration=1)
+                audio = recognizer.listen(source, timeout=3, phrase_time_limit=100)
+                move = recognizer.recognize_google(audio).lower()
+                move=str(move)
+                move="".join(move.split())
+                return move
+            except sr.UnknownValueError:
+                print("Could not understand, try again.")
+                return None
+            except sr.RequestError:
+                print("Speech recognition service error.")
+                return None
 
-    # Start the game state streaming in a separate thread
-    stream_thread = threading.Thread(target=stream_game_state, args=(client, game_id, moves))
-    stream_thread.start()
+    def handle_user_input(self):
+        while True:
+            move = self.recognize_speech()
+            if not move:
+                continue
+            
+            print("Recognized move:", move)
+            
+            if move == 'end':
+                print("Exiting game.")
+                self.client.board.resign_game(self.game_id)
+                break
 
-    # Handle user input in the main thread
-    handle_user_input(client, game_id)
+            try:
+                self.client.board.make_move(game_id=self.game_id, move=move)
+
+            except berserk.exceptions.ResponseError:
+                print("Invalid move, try again.")
+                continue
+
+            print("Waiting for AI...")
+
+    def play(self):
+        self.start_game()
+        stream_thread = threading.Thread(target=self.stream_game_state)
+        stream_thread.start()
+        self.handle_user_input()
 
 if __name__ == "__main__":
-    main()
+    lichess_client = LichessClient()
+    lichess_client.play()
 
